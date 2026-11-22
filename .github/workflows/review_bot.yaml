@@ -37,7 +37,7 @@ jobs:
             --output review.json \
             --summary review.md
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          NEARAI_API_KEY: ${{ secrets.NEARAI_API_KEY }}
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
       - name: Show the summary in the run page
         run: cat review.md >> $GITHUB_STEP_SUMMARY
