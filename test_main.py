@@ -3,9 +3,11 @@ import contextlib
 import io
 import os
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import litellm
+import yaml
 from forecasting_tools import GeneralLlm, MonetaryCostManager
 
 import main
@@ -13,6 +15,30 @@ from bot_helpers import check_environment
 
 
 class BotTests(unittest.TestCase):
+    def test_only_minibench_workflow_is_scheduled(self):
+        workflow_dir = Path(__file__).parent / ".github" / "workflows"
+        for path in workflow_dir.glob("*.yaml"):
+            with self.subTest(workflow=path.name):
+                workflow = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
+                triggers = workflow["on"]
+                self.assertIn("workflow_dispatch", triggers)
+                if path.name == "run_bot_on_tournament.yaml":
+                    self.assertEqual(set(triggers), {"workflow_dispatch", "schedule"})
+                    self.assertEqual(triggers["schedule"], [{"cron": "7,27,47 * * * *"}])
+                    self.assertEqual(workflow["concurrency"], {"group": "${{ github.workflow }}", "cancel-in-progress": "false"})
+                    run_step = next(step for step in workflow["jobs"]["forecast_job"]["steps"] if step.get("name") == "Run bot")
+                    self.assertEqual(run_step["run"].strip(), "uv run python main.py")
+                    self.assertEqual(run_step["env"]["MAX_LLM_COST_USD"], "1.0")
+                else:
+                    self.assertEqual(set(triggers), {"workflow_dispatch"})
+
+    def test_default_budget_is_one_dollar(self):
+        def check_budget():
+            self.assertEqual(MonetaryCostManager.get_active_cost_managers()[-1].hard_limit, 1.0)
+
+        with patch.dict(os.environ, {}, clear=True), patch.object(main, "main", side_effect=check_budget), contextlib.redirect_stdout(io.StringIO()):
+            main.run_with_budget()
+
     def test_near_only_environment_and_construction(self):
         with patch.dict(os.environ, {"NEARAI_API_KEY": "dummy", "METACULUS_TOKEN": "dummy"}, clear=True):
             check_environment()
