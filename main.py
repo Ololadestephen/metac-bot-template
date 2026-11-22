@@ -74,7 +74,6 @@ class BudgetedNearLlm(GeneralLlm):
             model=f"openai/{model_id}",
             api_base="https://cloud-api.near.ai/v1",
             api_key=os.getenv("NEARAI_API_KEY"),
-            temperature=0.3,
             timeout=40,
             allowed_tries=2,
         )
