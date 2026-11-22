@@ -25,6 +25,11 @@ class BotTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
                 check_environment()
 
+    def test_other_provider_key_without_gemini_rejected(self):
+        with patch.dict(os.environ, {"METACULUS_TOKEN": "dummy", "OPENROUTER_API_KEY": "dummy"}, clear=True):
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+                check_environment()
+
     def test_budget_summary_on_empty_run_and_error(self):
         for error in (None, RuntimeError("failed")):
             output = io.StringIO()
