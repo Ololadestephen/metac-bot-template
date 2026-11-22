@@ -57,7 +57,7 @@ def silence_noisy_dependencies() -> None:
 
 def check_environment(strict: bool = True) -> None:
     """
-    Verify METACULUS_TOKEN and GEMINI_API_KEY are set. On failure with
+    Verify METACULUS_TOKEN and NEARAI_API_KEY are set. On failure with
     strict=True, exits the process with a non-zero status.
     """
     problems: list[str] = []
@@ -68,10 +68,10 @@ def check_environment(strict: bool = True) -> None:
             "Get one at https://www.metaculus.com/futureeval/participate/"
         )
 
-    if not _is_real_env("GEMINI_API_KEY"):
+    if not _is_real_env("NEARAI_API_KEY"):
         problems.append(
-            "GEMINI_API_KEY is missing or still a placeholder. This bot pins every "
-            "LLM role to gemini/gemini-3.8-flash, so other provider keys are not used."
+            "NEARAI_API_KEY is missing or still a placeholder. This bot uses "
+            "NEAR AI Cloud for every LLM role, so other provider keys are not used."
         )
 
     if problems:

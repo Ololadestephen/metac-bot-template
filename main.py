@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 import dotenv
+import litellm
 
 # Runtime helpers (env validation, banners, dependency-warning suppression).
 from bot_helpers import (
@@ -48,11 +49,31 @@ dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
 
-class BudgetedGeminiLlm(GeneralLlm):
+class BudgetedNearLlm(GeneralLlm):
     def __init__(self) -> None:
+        model_id = os.getenv("NEARAI_MODEL", "openai/gpt-6-luna")
+        if model_id != "openai/gpt-6-luna":
+            raise ValueError(
+                f"Unknown NEAR AI pricing for {model_id!r}. Verify /v1/models and "
+                "register its pricing before using this NEARAI_MODEL."
+            )
+        pricing = {
+            "input_cost_per_token": 0.10 / 1_000_000,
+            "output_cost_per_token": 0.50 / 1_000_000,
+            "cache_read_input_token_cost": 0.01 / 1_000_000,
+            "cache_creation_input_token_cost": 0.125 / 1_000_000,
+            "input_cost_per_token_above_272k_tokens": 0.20 / 1_000_000,
+            "output_cost_per_token_above_272k_tokens": 0.75 / 1_000_000,
+            "cache_read_input_token_cost_above_272k_tokens": 0.02 / 1_000_000,
+            "cache_creation_input_token_cost_above_272k_tokens": 0.25 / 1_000_000,
+            "litellm_provider": "openai",
+            "mode": "chat",
+        }
+        litellm.register_model({model_id: pricing, f"openai/{model_id}": pricing})
         super().__init__(
-            model="gemini/gemini-3.8-flash",
-            temperature=0.3,
+            model=f"openai/{model_id}",
+            api_base="https://cloud-api.near.ai/v1",
+            api_key=os.getenv("NEARAI_API_KEY"),
             timeout=40,
             allowed_tries=2,
         )
@@ -149,7 +170,7 @@ class FallTemplateBot2026(ForecastBot):
 
     @classmethod
     def _llm_config_defaults(cls):
-        llm = BudgetedGeminiLlm()
+        llm = BudgetedNearLlm()
         return dict.fromkeys(("default", "summarizer", "researcher", "parser"), llm)
 
     ##################################### RESEARCH #####################################
