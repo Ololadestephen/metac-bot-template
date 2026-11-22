@@ -71,7 +71,7 @@ def check_environment(strict: bool = True) -> None:
     if not _is_real_env("GEMINI_API_KEY"):
         problems.append(
             "GEMINI_API_KEY is missing or still a placeholder. This bot pins every "
-            "LLM role to gemini/gemini-2.5-flash, so other provider keys are not used."
+            "LLM role to gemini/gemini-3.8-flash, so other provider keys are not used."
         )
 
     if problems:
