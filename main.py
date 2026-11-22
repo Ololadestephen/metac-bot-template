@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 class BudgetedGeminiLlm(GeneralLlm):
     def __init__(self) -> None:
         super().__init__(
-            model="gemini/gemini-2.5-flash",
+            model="gemini/gemini-3.8-flash",
             temperature=0.3,
             timeout=40,
             allowed_tries=2,

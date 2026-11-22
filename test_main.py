@@ -17,7 +17,7 @@ class BotTests(unittest.TestCase):
             check_environment()
             bot = main.FallTemplateBot2026(publish_reports_to_metaculus=False)
         llms = [bot.get_llm(role, "llm") for role in ("default", "summarizer", "researcher", "parser")]
-        self.assertTrue(all(llm.model == "gemini/gemini-2.5-flash" for llm in llms))
+        self.assertTrue(all(llm.model == "gemini/gemini-3.8-flash" for llm in llms))
         self.assertTrue(all(llm is llms[0] for llm in llms))
 
     def test_missing_key_rejected(self):
