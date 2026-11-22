@@ -48,6 +48,16 @@ class BotTests(unittest.TestCase):
         self.assertTrue(all(llm is llms[0] for llm in llms))
         self.assertEqual(llms[0].litellm_kwargs["api_base"], "https://cloud-api.near.ai/v1")
         self.assertEqual(llms[0].litellm_kwargs["api_key"], "dummy")
+        self.assertEqual(llms[0].litellm_kwargs["max_tokens"], 8192)
+        self.assertEqual(bot._max_concurrent_questions, 5)
+        self.assertEqual(bot._concurrency_limiter._value, 5)
+
+    def test_reservation_uses_token_counter_and_output_bound(self):
+        llm = main.BudgetedNearLlm()
+        for prompt in ("", "Forecast this question"):
+            with patch.object(litellm, "token_counter", return_value=100) as counter:
+                self.assertAlmostEqual(llm._estimate_max_cost(prompt), 100 * 0.25e-6 + 8192 * 0.75e-6)
+            counter.assert_called_once_with(model=llm.model, messages=llm.model_input_to_message(prompt))
 
     def test_unknown_model_pricing_rejected(self):
         for model in ("", "openai/unknown-model"):
@@ -102,7 +112,7 @@ class CostTests(unittest.IsolatedAsyncioTestCase):
         llm = main.BudgetedNearLlm()
         llm.litellm_kwargs["mock_response"] = "Probability: 50%"
         llm.litellm_kwargs["api_key"] = "dummy"
-        with MonetaryCostManager(0.000000001) as cm, MonetaryCostManager(), patch(
+        with MonetaryCostManager(llm._estimate_max_cost("Give a probability")) as cm, MonetaryCostManager(), patch(
             "forecasting_tools.ai_models.general_llm.acompletion", wraps=litellm.acompletion
         ) as completion:
             answer = await llm.invoke("Give a probability")
@@ -115,7 +125,7 @@ class CostTests(unittest.IsolatedAsyncioTestCase):
             spent = cm.current_usage
             with patch.object(GeneralLlm, "_mockable_direct_call_to_model", new_callable=AsyncMock) as call:
                 with self.assertRaises(RuntimeError):
-                    await llm._mockable_direct_call_to_model("blocked")
+                    await llm._mockable_direct_call_to_model("Give a probability")
                 call.assert_not_awaited()
             self.assertEqual(cm.current_usage, spent)
         print(f"NEAR LiteLLM mock-response tracked cost: ${spent:.9f}; next call blocked")
@@ -128,11 +138,71 @@ class CostTests(unittest.IsolatedAsyncioTestCase):
             MonetaryCostManager.increase_current_usage_in_parent_managers(0.5)
             return "ok"
 
-        with MonetaryCostManager(0.5), patch.object(GeneralLlm, "_mockable_direct_call_to_model", side_effect=charged_call) as call:
+        with MonetaryCostManager(0.5), patch.object(llm, "_estimate_max_cost", return_value=0.5), patch.object(GeneralLlm, "_mockable_direct_call_to_model", side_effect=charged_call) as call:
             results = await asyncio.gather(*(llm._mockable_direct_call_to_model("test") for _ in range(3)), return_exceptions=True)
         self.assertEqual(results[0], "ok")
         self.assertTrue(all(isinstance(result, RuntimeError) for result in results[1:]))
         self.assertEqual(call.await_count, 1)
+
+    async def test_calls_overlap(self):
+        llm = main.BudgetedNearLlm()
+        entered = 0
+        all_entered = asyncio.Event()
+
+        async def overlapping_call(prompt):
+            nonlocal entered
+            entered += 1
+            if entered == 5:
+                all_entered.set()
+            await asyncio.wait_for(all_entered.wait(), timeout=1)
+            return "ok"
+
+        with MonetaryCostManager(1), patch.object(GeneralLlm, "_mockable_direct_call_to_model", side_effect=overlapping_call):
+            results = await asyncio.gather(*(llm._mockable_direct_call_to_model("test") for _ in range(5)))
+        self.assertEqual(results, ["ok"] * 5)
+        self.assertFalse(llm._reservations)
+
+    async def test_inflight_reservation_shared_across_instances_and_managers(self):
+        first, second = main.BudgetedNearLlm(), main.BudgetedNearLlm()
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def waiting_call(prompt):
+            entered.set()
+            await release.wait()
+            return "ok"
+
+        with MonetaryCostManager(1) as outer, MonetaryCostManager(first._estimate_max_cost("test")) as inner, patch.object(GeneralLlm, "_mockable_direct_call_to_model", side_effect=waiting_call) as call:
+            task = asyncio.create_task(first._mockable_direct_call_to_model("test"))
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=1)
+                with self.assertRaisesRegex(RuntimeError, "LLM spending cap reached"):
+                    await second._mockable_direct_call_to_model("test")
+                self.assertEqual(outer.current_usage, 0)
+                self.assertEqual(inner.current_usage, 0)
+                self.assertEqual(call.await_count, 1)
+            finally:
+                release.set()
+                await task
+            self.assertEqual(await second._mockable_direct_call_to_model("test"), "ok")
+        self.assertFalse(first._reservations)
+
+    async def test_reservations_released_after_error_and_cancellation(self):
+        llm = main.BudgetedNearLlm()
+        for error in (ValueError("failure"), asyncio.CancelledError()):
+            with MonetaryCostManager(llm._estimate_max_cost("test")), patch.object(GeneralLlm, "_mockable_direct_call_to_model", side_effect=[error, "ok"]):
+                with self.assertRaises(type(error)):
+                    await llm._mockable_direct_call_to_model("test")
+                self.assertFalse(llm._reservations)
+                self.assertEqual(await llm._mockable_direct_call_to_model("test"), "ok")
+            self.assertFalse(llm._reservations)
+
+    async def test_refusal_does_not_leak_partial_reservations(self):
+        llm = main.BudgetedNearLlm()
+        with MonetaryCostManager(1), MonetaryCostManager(1e-9), patch.object(GeneralLlm, "_mockable_direct_call_to_model", new_callable=AsyncMock) as call:
+            with self.assertRaises(RuntimeError):
+                await llm._mockable_direct_call_to_model("test")
+            call.assert_not_awaited()
+        self.assertFalse(llm._reservations)
 
 
 if __name__ == "__main__":

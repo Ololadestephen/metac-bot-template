@@ -50,6 +50,9 @@ logger = logging.getLogger(__name__)
 
 
 class BudgetedNearLlm(GeneralLlm):
+    _reservation_lock = asyncio.Lock()
+    _reservations: dict[MonetaryCostManager, dict[object, float]] = {}
+
     def __init__(self) -> None:
         model_id = os.getenv("NEARAI_MODEL", "openai/gpt-6-luna")
         if model_id != "openai/gpt-6-luna":
@@ -74,18 +77,42 @@ class BudgetedNearLlm(GeneralLlm):
             model=f"openai/{model_id}",
             api_base="https://cloud-api.near.ai/v1",
             api_key=os.getenv("NEARAI_API_KEY"),
+            max_tokens=8192,
             timeout=40,
             allowed_tries=2,
         )
-        self._budget_lock = asyncio.Lock()
+
+    def _estimate_max_cost(self, prompt) -> float:
+        prompt_tokens = litellm.token_counter(
+            model=self.model,
+            messages=self.model_input_to_message(prompt),
+        )
+        # Use the highest advertised input (including cache writes) and output tiers.
+        return prompt_tokens * (0.25 / 1_000_000) + self.litellm_kwargs["max_tokens"] * (0.75 / 1_000_000)
 
     async def _mockable_direct_call_to_model(self, prompt):
-        # Serialize calls so completed usage is checked before the next request.
-        async with self._budget_lock:
-            for manager in MonetaryCostManager.get_active_cost_managers():
-                if manager.hard_limit and manager.current_usage >= manager.hard_limit:
+        reservation = self._estimate_max_cost(prompt)
+        managers = [
+            manager for manager in MonetaryCostManager.get_active_cost_managers()
+            if manager.hard_limit
+        ]
+        ticket = object()
+        async with self._reservation_lock:
+            for manager in managers:
+                outstanding = self._reservations.get(manager, {})
+                if math.fsum((manager.current_usage, *outstanding.values(), reservation)) > manager.hard_limit:
                     raise RuntimeError("LLM spending cap reached; no further calls allowed")
+            for manager in managers:
+                self._reservations.setdefault(manager, {})[ticket] = reservation
+        try:
             return await super()._mockable_direct_call_to_model(prompt)
+        finally:
+            async with self._reservation_lock:
+                for manager in managers:
+                    outstanding = self._reservations[manager]
+                    del outstanding[ticket]
+                    if not outstanding:
+                        del self._reservations[manager]
 
 
 class FallTemplateBot2026(ForecastBot):
@@ -163,7 +190,7 @@ class FallTemplateBot2026(ForecastBot):
     """
 
     _max_concurrent_questions = (
-        1  # Set this to whatever works for your search-provider/ai-model rate limits
+        5  # Set this to whatever works for your search-provider/ai-model rate limits
     )
     _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
     _structure_output_validation_samples = 2
