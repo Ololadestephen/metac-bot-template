@@ -1,6 +1,8 @@
 import argparse
 import asyncio
 import logging
+import math
+import os
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -23,6 +25,7 @@ from forecasting_tools import (
     GeneralLlm,
     MetaculusClient,
     MetaculusQuestion,
+    MonetaryCostManager,
     MultipleChoiceQuestion,
     NumericDistribution,
     NumericQuestion,
@@ -43,6 +46,25 @@ from forecasting_tools import (
 
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
+
+
+class BudgetedGeminiLlm(GeneralLlm):
+    def __init__(self) -> None:
+        super().__init__(
+            model="gemini/gemini-2.5-flash",
+            temperature=0.3,
+            timeout=40,
+            allowed_tries=2,
+        )
+        self._budget_lock = asyncio.Lock()
+
+    async def _mockable_direct_call_to_model(self, prompt):
+        # Serialize calls so completed usage is checked before the next request.
+        async with self._budget_lock:
+            for manager in MonetaryCostManager.get_active_cost_managers():
+                if manager.hard_limit and manager.current_usage >= manager.hard_limit:
+                    raise RuntimeError("LLM spending cap reached; no further calls allowed")
+            return await super()._mockable_direct_call_to_model(prompt)
 
 
 class FallTemplateBot2026(ForecastBot):
@@ -75,8 +97,7 @@ class FallTemplateBot2026(ForecastBot):
     structure_output uses an LLM to intelligently reformat the output into the needed structure.
 
     By default (i.e. 'tournament' mode), when you run this script, it will forecast on any open questions in the
-    primary bot tournament and MiniBench. If you want to forecast on only one or the other, you can remove one
-    of them from the 'tournament' mode code at the bottom of the file.
+    MiniBench only.
 
     You can experiment with what models work best with your bot by using the `llms` parameter when initializing the bot.
     You can initialize the bot with any number of models. For example,
@@ -125,6 +146,11 @@ class FallTemplateBot2026(ForecastBot):
     )
     _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
     _structure_output_validation_samples = 2
+
+    @classmethod
+    def _llm_config_defaults(cls):
+        llm = BudgetedGeminiLlm()
+        return dict.fromkeys(("default", "summarizer", "researcher", "parser"), llm)
 
     ##################################### RESEARCH #####################################
 
@@ -683,7 +709,7 @@ class FallTemplateBot2026(ForecastBot):
         )
 
 
-if __name__ == "__main__":
+def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -704,9 +730,6 @@ if __name__ == "__main__":
     publish_to_metaculus = True
     print_startup_banner(run_mode, will_publish=publish_to_metaculus)
 
-    # Configure the bot. The `llms=` block below is commented out to use
-    # whichever default models forecasting-tools picks based on your env vars;
-    # uncomment and edit to pin specific models.
     template_bot = FallTemplateBot2026(
         research_reports_per_question=1,
         predictions_per_research_report=5,
@@ -715,24 +738,13 @@ if __name__ == "__main__":
         folder_to_save_reports_to=None,
         skip_previously_forecasted_questions=True,
         extra_metadata_in_explanation=True,
-        # llms={
-        #     "default": GeneralLlm(
-        #         model="openrouter/openai/gpt-4o",
-        #         temperature=0.3,
-        #         timeout=40,
-        #         allowed_tries=2,
-        #     ),
-        #     "summarizer": "openai/gpt-4o-mini",
-        #     "researcher": "asknews/news-summaries",
-        #     "parser": "openai/gpt-4o-mini",
-        # },
     )
 
     # Per-mode tournament URL shown in the summary banner footer. These
     # piggyback on the forecasting_tools SDK constants and need updating
     # whenever those rotate seasons.
     TOURNAMENT_URLS = {
-        "tournament": "https://www.metaculus.com/tournament/fall-futureeval-2026/",
+        "tournament": f"https://www.metaculus.com/tournament/{MetaculusClient.CURRENT_MINIBENCH_ID}/",
         "metaculus_cup": "https://www.metaculus.com/tournament/metaculus-cup-fall-2026/",
         "test_questions": "https://www.metaculus.com/tournament/bot-testing-area/",
     }
@@ -742,17 +754,11 @@ if __name__ == "__main__":
     # summary printers below.
     client = MetaculusClient()
     if run_mode == "tournament":
-        seasonal_tournament_reports = asyncio.run(
-            template_bot.forecast_on_tournament(
-                client.CURRENT_AI_COMPETITION_ID, return_exceptions=True
-            )
-        )
-        minibench_reports = asyncio.run(
+        forecast_reports = asyncio.run(
             template_bot.forecast_on_tournament(
                 client.CURRENT_MINIBENCH_ID, return_exceptions=True
             )
         )
-        forecast_reports = seasonal_tournament_reports + minibench_reports
     elif run_mode == "metaculus_cup":
         # The Metaculus Cup may be uninitialized near the start of a season
         # (Jan/May/Sep). MetaculusClient.ACX_2025_TOURNAMENT = 32564 and
@@ -781,3 +787,18 @@ if __name__ == "__main__":
         will_publish=publish_to_metaculus,
         tournament_url=TOURNAMENT_URLS.get(run_mode),
     )
+
+
+def run_with_budget() -> None:
+    max_cost = float(os.getenv("MAX_LLM_COST_USD", "1.0"))
+    if not math.isfinite(max_cost) or max_cost <= 0:
+        raise ValueError("MAX_LLM_COST_USD must be a finite positive number")
+    with MonetaryCostManager(max_cost) as cm:
+        try:
+            main()
+        finally:
+            print(f"LLM cost spent: ${cm.current_usage:.6f} (cap: ${max_cost:.6f})")
+
+
+if __name__ == "__main__":
+    run_with_budget()
